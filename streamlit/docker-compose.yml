@@ -3,8 +3,8 @@ version: '3'
 services:
   streamlit:
       image: sample_streamlit
-      user: 1000:1000
       container_name: sample_streamlit
+      user: 1000:1000
       restart: always
       build:
         context: .
