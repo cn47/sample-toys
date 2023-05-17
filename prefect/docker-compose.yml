@@ -1,0 +1,111 @@
+version: "3"
+x-prefect-image: &PREFECT_IMAGE
+  prefecthq/prefect:2.10.7-python3.11
+
+services:
+  prefect-server:
+      image: *PREFECT_IMAGE
+      container_name: prefect-server
+      restart: always
+      volumes:
+        - prefect:/root/.prefect
+      environment:
+        - PREFECT_API_DATABASE_CONNECTION_URL=postgresql+asyncpg://postgres:postgres@database:5432/prefect
+        - PREFECT_SERVER_API_HOST=0.0.0.0
+        - PREFECT_API_URL=http://127.0.0.1:4200/api
+      ports:
+        - 4200:4200
+      depends_on:
+        - database
+      profiles:
+        - prefect-server
+      entrypoint: >
+        prefect server start --host 0.0.0.0
+  prefect-agent:
+      image: *PREFECT_IMAGE
+      container_name: prefect-agent
+      restart: always
+      environment:
+        - PREFECT_API_URL=http://prefect-server:4200/api
+      profiles:
+        - agent
+      entrypoint: >
+        prefect agent start -p ml-app-pool -q train
+  database:
+      image: postgres:15.2-alpine
+      container_name: prefect-db
+      restart: always
+      environment:
+        - POSTGRES_USER=${PREFECT_POSTGRES_USER:-postgres}
+        - POSTGRES_PASSWORD=${PREFECT_POSTGRES_PASSWORD:-postgres}
+        - POSTGRES_DB=${PREFECT_POSTGRES_DB:-prefect}
+      expose:
+        - 5432
+      volumes:
+        - db:/var/lib/postgresql/data
+      profiles:
+        - prefect-server
+  minio:
+      image: minio/minio:latest
+      container_name: prefect-minio
+      volumes:
+        - minio:/data
+      environment:
+        - MINIO_ROOT_USER=${PREFECT_MINIO_USER:-minioadmin}
+        - MINIO_ROOT_PASSWORD=${PREFECT_MINIO_PASSWORD:-minioadmin}
+      ports:
+        - 9000:9000
+        - 9001:9001
+      profiles:
+        - minio
+      entrypoint: >
+       minio server --address 0.0.0.0:9000 --console-address 0.0.0.0:9001 /data
+  minio-create-bucket:
+      image: minio/mc
+      depends_on:
+        - minio
+      profiles:
+        - minio
+      entrypoint: >
+        bash -c "
+          until (mc config host add minio http://minio:9000 ${PREFECT_MINIO_USER:-minioadmin} ${PREFECT_MINIO_PASSWORD:-minioadmin}) do
+            echo 'mc...' && sleep 1
+          done ;
+          mc mb --region ap-northeast-1 --ignore-existing minio/prefect-flows;
+          mc policy download minio/prefect-flows;
+        "
+  ml-app:
+      image: ml-app
+      container_name: ml-app
+      user: 1000:1000
+      restart: always
+      build:
+        context: .
+        dockerfile: Dockerfile
+      working_dir: /ml-app
+      volumes:
+        - /etc/passwd:/etc/passwd:ro
+        - /etc/group:/etc/group:ro
+        - ./ml-app:/ml-app
+        - prefect:${HOME}/.prefect
+      environment:
+        - PREFECT_API_URL=http://prefect-server:4200/api
+        - AWS_ACCESS_KEY_ID=${PREFECT_MINIO_USER:-minioadmin}
+        - AWS_SECRET_ACCESS_KEY=${PREFECT_MINIO_PASSWORD:-minioadmin}
+        - AWS_DEFAULT_REGION=ap-northeast-1
+        - AWS_ENDPOINT_URL=http://minio:9000
+      profiles:
+        - ml-app
+      ports:
+        - 5000:5000
+      tty: true
+      command: >
+        mlflow server --backend-store-uri /ml-app/data/mlflow/mlruns -h 0.0.0.0
+
+volumes:
+  prefect:
+  db:
+  minio:
+networks:
+  default:
+    name: prefect-network
